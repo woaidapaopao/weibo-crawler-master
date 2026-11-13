@@ -15,7 +15,7 @@ install_media_compat(weibo)
 
 def main(schedule_interval):
     """
-    主函数，用于设置定时任务和执行微��爬虫脚本。
+    主函数，用于设置定时任务和执行微博爬虫脚本。
 
     Parameters:
         schedule_interval (int): 循环间隔，以分钟为单位。
@@ -36,7 +36,7 @@ def main(schedule_interval):
             break
         except Exception as error:
             if const.NOTIFY["NOTIFY"]:
-                push_deer(f"weibo-crawler运行出错, 错误为{error}")
+                push_deer(f"weibo-crawler运行出错，错误为{error}")
                 weibo.logger.exception(error)
 
 if __name__ == "__main__":
