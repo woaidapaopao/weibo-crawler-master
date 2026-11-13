@@ -1,6 +1,7 @@
-"""Tests for the fork's GIF-versus-image classification."""
+"""Tests for the fork's media compatibility helpers."""
 
 import unittest
+from datetime import datetime
 
 from util import media_compat
 
@@ -16,9 +17,7 @@ class MediaCompatTest(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(
-            media_compat.get_pics(post), ["https://wx1.sinaimg.cn/large/a.gif"]
-        )
+        self.assertEqual(media_compat.get_pics(post), ["https://wx1.sinaimg.cn/large/a.gif"])
         self.assertEqual(
             media_compat.get_video_url(post),
             "https://f.video.weibocdn.com/a.mp4?token=x",
@@ -59,9 +58,33 @@ class MediaCompatTest(unittest.TestCase):
             },
         }
         self.assertEqual(
-            media_compat.get_video_url(post, lambda _post: "https://f.video.weibocdn.com/regular.mp4"),
+            media_compat.get_video_url(
+                post, lambda _post: "https://f.video.weibocdn.com/regular.mp4"
+            ),
             "https://f.video.weibocdn.com/regular.mp4",
         )
+
+    def test_upstream_timestamp_prefix_options(self):
+        self.assertEqual(
+            media_compat.timestamp_prefix("2024-01-02T03:04:05"),
+            "2024-01-02_03-04-05",
+        )
+        self.assertEqual(
+            media_compat.timestamp_prefix(
+                "2024-01-02T03:04:05", format_string="%Y%m%d_%H%M%S"
+            ),
+            "20240102_030405",
+        )
+        self.assertEqual(
+            media_compat.timestamp_prefix(
+                "2024-01-02T03:04:05", "123", "%Y%m%d_%H%M%S"
+            ),
+            "20240102_030405_123",
+        )
+
+    def test_rejects_unsupported_timestamp_format(self):
+        with self.assertRaises(ValueError):
+            media_compat.timestamp_prefix("2024-01-02T03:04:05", format_string="%Y/%m/%d")
 
 
 if __name__ == "__main__":
