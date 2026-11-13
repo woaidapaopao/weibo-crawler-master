@@ -5,12 +5,17 @@ import schedule
 
 import const
 import weibo
+from util.media_compat import install as install_media_compat
 from util.notify import push_deer
+
+# Preserve the fork's GIF-as-video media handling while keeping the legacy Baidu
+# image proxy in Weibo.handle_download intact.
+install_media_compat(weibo)
 
 
 def main(schedule_interval):
     """
-    主函数，用于设置定时任务和执行微博爬虫脚本。
+    主函数，用于设置定时任务和执行微��爬虫脚本。
 
     Parameters:
         schedule_interval (int): 循环间隔，以分钟为单位。
