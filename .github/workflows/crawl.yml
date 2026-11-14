@@ -1,0 +1,113 @@
+name: 微博抓取
+
+on:
+  # 手机手工触发：GitHub App / 手机浏览器 → Actions → 运行工作流
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: '抓取最近多少天'
+        required: false
+        default: '3'
+      media:
+        description: '是否下载图片视频'
+        type: choice
+        options: ['no', 'yes']
+        default: 'no'
+  # 每天北京时间 03:00 自动跑（UTC 19:00）
+  schedule:
+    - cron: '0 19 * * *'
+
+concurrency:
+  group: weibo-crawl
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install lxml requests tqdm schedule
+
+      - name: 写入配置
+        env:
+          COOKIE: ${{ secrets.WEIBO_COOKIE }}
+          SINCE_DAYS: ${{ github.event.inputs.since_days || '3' }}
+          MEDIA: ${{ github.event.inputs.media || 'no' }}
+          USER_LIST: ${{ secrets.WEIBO_USER_LIST }}
+        run: |
+          python - <<'PY'
+          import json, os
+          media = 1 if os.environ.get("MEDIA") == "yes" else 0
+          c = json.load(open("config.json"))
+          c.update({
+              "user_id_list": "user_id_list.txt",
+              "since_date": int(os.environ.get("SINCE_DAYS", "3")),
+              "write_mode": ["csv", "json"],
+              "cookie": "",
+              "original_pic_download": media,
+              "retweet_pic_download": 0,
+              "original_video_download": media,
+              "retweet_video_download": 0,
+              "original_live_photo_download": media,
+              "retweet_live_photo_download": 0,
+              "download_comment": 0,
+              "download_repost": 0,
+          })
+          json.dump(c, open("config.json", "w"), ensure_ascii=False, indent=4)
+          open("cookie.txt", "w").write(os.environ["COOKIE"].strip() + "\n")
+          user_list = os.environ.get("USER_LIST") or "\n".join([
+              "7720086464 小优优子",
+              "3654972822 Hi李佳丽",
+              "7797724598 komi酱ww",
+          ])
+          open("user_id_list.txt", "w").write(user_list.strip() + "\n")
+          print("配置就绪，since_date =", c["since_date"], "天，媒体 =", media)
+          PY
+
+      - name: 开始抓取
+        run: python weibo.py
+
+      - name: 上传结果（文本）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weibo-data-${{ github.run_number }}
+          path: |
+            weibo/**/*.csv
+            weibo/**/*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: 上传结果（媒体，仅在勾选时）
+        if: github.event.inputs.media == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weibo-media-${{ github.run_number }}
+          path: |
+            weibo/**/img/**/*
+            weibo/**/video/**/*
+            weibo/**/live_photo/**/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 汇总
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, json, os
+          rows = []
+          for f in glob.glob("weibo/*/*.json"):
+              try:
+                  rows.append((os.path.basename(f), len(json.load(open(f)).get("weibo", []))))
+              except Exception:
+                  pass
+          print("账号结果:", rows or "无产出")
+          print("媒体文件数:", len(glob.glob("weibo/**/*.mp4", recursive=True)) + len(glob.glob("weibo/**/*.jpg", recursive=True)))
+          PY
