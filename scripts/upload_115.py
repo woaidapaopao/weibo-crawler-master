@@ -151,10 +151,13 @@ def main() -> int:
         resp = client.refresh_access_token()
         data = resp.get("data") or {}
         new_refresh = data.get("refresh_token") or getattr(client, "refresh_token", "")
-        log(f"token 刷新: {'成功' if resp.get('state') else resp}")
+        # 不要把响应内容打进日志：其中含 access_token / refresh_token
+        log(f"token 刷新: {'成功' if resp.get('state') else '失败'}，有效期 {data.get('expires_in', '?')} 秒")
+        # 库的 upload_* 会直接取 headers['authorization']，刷新后需要同步写入
+        client.headers = dict(client.headers, authorization=f"Bearer {client.access_token}")
         save_refresh_token(new_refresh)
     except Exception as exc:  # noqa: BLE001
-        log(f"token 刷新失败，继续尝试直连: {exc}")
+        log(f"token 刷新失败，继续尝试直连: {type(exc).__name__}")
 
     root = ensure_dir(client, TARGET_CID, REMOTE_DIR)
     total = ok = 0
