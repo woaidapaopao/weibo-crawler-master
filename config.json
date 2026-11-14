@@ -18,5 +18,7 @@
     "download_repost": 1,
     "repost_max_download_count": 100,
     "user_id_as_folder_name": 0,
-    "remove_html_tag": 1
+    "remove_html_tag": 1,
+    "timestamp_prefix_format": "%Y-%m-%d_%H-%M-%S",
+    "timestamp_prefix_include_id": 0
 }
