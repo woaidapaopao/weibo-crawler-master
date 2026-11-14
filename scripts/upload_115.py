@@ -17,7 +17,8 @@
 
 import base64
 import hashlib
-import signal
+import multiprocessing
+import re
 import os
 import sys
 import time
@@ -41,13 +42,22 @@ GH_REPO = env("GH_REPO", "woaidapaopao/weibo-crawler-master")
 
 MEDIA_DIRS = ("img", "video", "live_photo")
 RETRY = 3
-FILE_TIMEOUT = int(os.environ.get("UPLOAD_FILE_TIMEOUT", "180") or 180)
+FILE_TIMEOUT = int(os.environ.get("UPLOAD_FILE_TIMEOUT", "120") or 180)
 MAX_SECONDS = int(os.environ.get("UPLOAD_MAX_SECONDS", "3600") or 3600)
 START = time.time()
 
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
+_TOKEN_RE = re.compile(r"([0-9a-z]{3,8})\.[0-9a-f]{16,}\.[0-9a-f]{16,}")
+
+
+def mask(text: object) -> str:
+    """兜底脱敏：任何形似 115 token 的串都不进日志。"""
+    return _TOKEN_RE.sub(r"\1.***.***", str(text))
+
+
+def log(msg: str, level: str = "INFO") -> None:
+    elapsed = time.time() - START
+    print(mask(f"[{elapsed:7.1f}s][{level}] {msg}"), flush=True)
 
 
 def sha1_of(path: Path) -> str:
@@ -117,7 +127,7 @@ def list_children(client: P115OpenClient, cid: str):  # noqa: ANN201
             break
         offset += 200
     if not result and sample is not None:
-        log(f"  [调试] 列表返回 {len(data)} 项，字段: {list(sample.keys())}")
+        log(f"  列表返回 {len(data)} 项但没识别出目录，字段: {list(sample.keys())}", "WARN")
     return result
 
 
@@ -127,6 +137,8 @@ def ensure_dir(client: P115OpenClient, parent: str, name: str):
     if name in children:
         return children[name]
     resp = client.fs_mkdir_open({"file_name": name, "pid": parent})
+    if not resp.get("state"):
+        log(f"  建目录 {name} 返回 code={resp.get('code')} message={resp.get('message')}", "WARN")
     data = resp.get("data")
     if isinstance(data, list) and data:
         data = data[0]
@@ -146,12 +158,36 @@ def ensure_dir(client: P115OpenClient, parent: str, name: str):
     return None
 
 
-class _Timeout(Exception):
-    pass
+def _child_upload(client, path_str: str, pid: str, name: str, q) -> None:  # noqa: ANN001
+    """子进程里执行上传，父进程可在超时后直接终止它。"""
+    try:
+        path = Path(path_str)
+        resp = client.upload_file_open(
+            file=path_str,
+            pid=pid,
+            filename=name,
+            filesha1=sha1_of(path),
+            filesize=path.stat().st_size,
+        )
+        q.put(("ok", bool(resp.get("state")), resp.get("code"), resp.get("message")))
+    except Exception as exc:  # noqa: BLE001
+        q.put(("err", type(exc).__name__, str(exc)[:200], ""))
 
 
-def _alarm(signum, frame):  # noqa: ANN001
-    raise _Timeout()
+def upload_with_timeout(client, path: Path, pid: str, name: str) -> tuple:  # noqa: ANN001
+    """带硬超时的上传：超时直接杀子进程，避免阻塞 socket 挂死整轮。"""
+    ctx = multiprocessing.get_context("fork")
+    q = ctx.Queue()
+    proc = ctx.Process(target=_child_upload, args=(client, str(path), pid, name, q))
+    proc.start()
+    proc.join(FILE_TIMEOUT)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        return ("timeout", FILE_TIMEOUT, "", "")
+    if q.empty():
+        return ("err", "no-result", "子进程未返回结果", "")
+    return q.get()
 
 
 def upload_file(client: P115OpenClient, path: Path, pid: str, name: str = "") -> bool:
@@ -159,32 +195,24 @@ def upload_file(client: P115OpenClient, path: Path, pid: str, name: str = "") ->
     log(f"  → {name or path.name} ({size_kb} KB)")
     for attempt in range(1, RETRY + 1):
         started = time.time()
-        try:
-            signal.signal(signal.SIGALRM, _alarm)
-            signal.alarm(FILE_TIMEOUT)
-            try:
-                resp = client.upload_file_open(
-                    file=str(path),
-                    pid=pid,
-                    filename=name or path.name,
-                    filesha1=sha1_of(path),
-                    filesize=path.stat().st_size,
-                )
-            finally:
-                signal.alarm(0)
-            if resp.get("state"):
-                log(f"  ✓ {name or path.name} ({size_kb} KB, {time.time() - started:.1f}s)")
-                return True
-            log(f"  ! {name or path.name} 返回异常: code={resp.get('code')} message={resp.get('message')}")
-        except _Timeout:
-            log(f"  ! {name or path.name} 超时（>{FILE_TIMEOUT}s），第{attempt}次")
-        except Exception as exc:  # noqa: BLE001
-            log(f"  ! {name or path.name} 第{attempt}次失败: {type(exc).__name__}")
+        kind, a, b, c = upload_with_timeout(client, path, pid, name or path.name)
+        if kind == "ok" and a is True:
+            log(f"  ✓ {name or path.name} ({size_kb} KB, {time.time() - started:.1f}s)")
+            return True
+        if kind == "timeout":
+            log(f"  ! {name or path.name} 超时（>{FILE_TIMEOUT}s），第{attempt}/{RETRY}次", "WARN")
+        elif kind == "ok":
+            log(f"  ! {name or path.name} 返回失败 code={b} message={c}，第{attempt}/{RETRY}次", "WARN")
+        else:
+            log(f"  ! {name or path.name} 异常 {a}: {b}，第{attempt}/{RETRY}次", "WARN")
         time.sleep(2 * attempt)
     return False
 
 
 def main() -> int:
+    import p115client
+    log(f"p115client {getattr(p115client, '__version__', '?')} / Python {sys.version.split()[0]}")
+    log(f"目标 cid={TARGET_CID} 子目录={REMOTE_DIR} 本地目录={SRC_DIR} 单文件超时={FILE_TIMEOUT}s")
     if not SRC_DIR.is_dir():
         log(f"源目录不存在: {SRC_DIR}")
         return 1
@@ -205,7 +233,7 @@ def main() -> int:
             log(f"token 刷新成功，有效期 {resp.get('expires_in', '?')} 秒")
             new_refresh = resp.get("refresh_token") or new_refresh
         else:
-            log(f"token 刷新未成功: code={resp.get('code')} message={resp.get('message')}（继续用现有 access_token）")
+            log(f"token 刷新未成功: code={resp.get('code')} message={resp.get('message')}（继续用现有 access_token）", "WARN")
         # 库的 upload_* 会直接取 headers['authorization']，刷新后需要同步写入
         client.headers = dict(client.headers, authorization=f"Bearer {client.access_token}")
         save_refresh_token(new_refresh)
@@ -233,15 +261,16 @@ def main() -> int:
                     if not f.is_file() or f.name == "not_downloaded.txt":
                         continue
                     if time.time() - START > MAX_SECONDS:
-                        log(f"达到总时长上限 {MAX_SECONDS}s，停止上传")
-                        log(f"上传完成：成功 {ok}/{total}")
+                        log(f"达到总时长上限 {MAX_SECONDS}s，停止上传", "WARN")
+                        log(f"上传完成：成功 {ok}/{total}，用时 {time.time() - START:.0f}s")
                         return 2
                     total += 1
                     name = f.name if sub_cid != acc_cid else f"{account_dir.name}_{media}_{sub.name}_{f.name}"
                     if upload_file(client, f, sub_cid, name):
                         ok += 1
 
-    log(f"上传完成：成功 {ok}/{total}")
+    size_mb = sum(f.stat().st_size for f in SRC_DIR.rglob("*") if f.is_file()) / 1048576
+    log(f"上传完成：成功 {ok}/{total}，本地媒体 {size_mb:.1f} MB，用时 {time.time() - START:.0f}s")
     return 0 if total and ok == total else (0 if total == 0 else 2)
 
 
