@@ -17,6 +17,7 @@
 
 import base64
 import hashlib
+import signal
 import os
 import sys
 import time
@@ -40,6 +41,9 @@ GH_REPO = env("GH_REPO", "woaidapaopao/weibo-crawler-master")
 
 MEDIA_DIRS = ("img", "video", "live_photo")
 RETRY = 3
+FILE_TIMEOUT = int(os.environ.get("UPLOAD_FILE_TIMEOUT", "180") or 180)
+MAX_SECONDS = int(os.environ.get("UPLOAD_MAX_SECONDS", "3600") or 3600)
+START = time.time()
 
 
 def log(msg: str) -> None:
@@ -142,23 +146,40 @@ def ensure_dir(client: P115OpenClient, parent: str, name: str):
     return None
 
 
+class _Timeout(Exception):
+    pass
+
+
+def _alarm(signum, frame):  # noqa: ANN001
+    raise _Timeout()
+
+
 def upload_file(client: P115OpenClient, path: Path, pid: str, name: str = "") -> bool:
+    size_kb = path.stat().st_size // 1024
+    log(f"  → {name or path.name} ({size_kb} KB)")
     for attempt in range(1, RETRY + 1):
+        started = time.time()
         try:
-            resp = client.upload_file_open(
-                file=str(path),
-                pid=pid,
-                filename=name or path.name,
-                filesha1=sha1_of(path),
-                filesize=path.stat().st_size,
-            )
-            state = resp.get("state")
-            if state:
-                log(f"  ✓ {path.relative_to(SRC_DIR)} ({path.stat().st_size // 1024} KB)")
+            signal.signal(signal.SIGALRM, _alarm)
+            signal.alarm(FILE_TIMEOUT)
+            try:
+                resp = client.upload_file_open(
+                    file=str(path),
+                    pid=pid,
+                    filename=name or path.name,
+                    filesha1=sha1_of(path),
+                    filesize=path.stat().st_size,
+                )
+            finally:
+                signal.alarm(0)
+            if resp.get("state"):
+                log(f"  ✓ {name or path.name} ({size_kb} KB, {time.time() - started:.1f}s)")
                 return True
-            log(f"  ! {path.name} 返回异常: {resp}")
+            log(f"  ! {name or path.name} 返回异常: code={resp.get('code')} message={resp.get('message')}")
+        except _Timeout:
+            log(f"  ! {name or path.name} 超时（>{FILE_TIMEOUT}s），第{attempt}次")
         except Exception as exc:  # noqa: BLE001
-            log(f"  ! {path.name} 第{attempt}次失败: {exc}")
+            log(f"  ! {name or path.name} 第{attempt}次失败: {type(exc).__name__}")
         time.sleep(2 * attempt)
     return False
 
@@ -211,6 +232,10 @@ def main() -> int:
                 for f in sorted(sub.iterdir()):
                     if not f.is_file() or f.name == "not_downloaded.txt":
                         continue
+                    if time.time() - START > MAX_SECONDS:
+                        log(f"达到总时长上限 {MAX_SECONDS}s，停止上传")
+                        log(f"上传完成：成功 {ok}/{total}")
+                        return 2
                     total += 1
                     name = f.name if sub_cid != acc_cid else f"{account_dir.name}_{media}_{sub.name}_{f.name}"
                     if upload_file(client, f, sub_cid, name):
