@@ -99,7 +99,17 @@ class Weibo(object):
             "user_id_as_folder_name", 0
         )  # 结果目录名，取值为0或1，决定结果文件存储在用户昵称文件夹里还是用户id文件夹里
         
-        cookie_string = config.get("cookie")  # 微博cookie，可填可不填Add commentMore actions
+        # cookie 优先从同目录的 cookie.txt 读取（该文件已被 .gitignore 忽略，
+        # 避免把登录凭据提交进 git），没有时再回落到 config.json 的 cookie 字段
+        cookie_string = None
+        cookie_file = os.path.join(
+            os.path.split(os.path.realpath(__file__))[0], "cookie.txt"
+        )
+        if os.path.isfile(cookie_file):
+            with open(cookie_file, encoding="utf-8") as f:
+                cookie_string = f.read().strip() or None
+        if not cookie_string:
+            cookie_string = config.get("cookie")  # 微博cookie，可填可不填Add commentMore actions
         cookies = {}
         if cookie_string:
             for pair in cookie_string.split(';'):
@@ -118,8 +128,11 @@ class Weibo(object):
             'sec-fetch-mode': 'navigate',
             'sec-fetch-site': 'same-origin',
             'upgrade-insecure-requests': '1',
+            'referer': 'https://m.weibo.cn/',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0',
         }
+        # 图片/视频 CDN 只认 weibo.com 的 Referer，缺失会返回 403
+        self.media_headers = dict(self.headers, referer='https://weibo.com/')
 
         self.mysql_config = config.get("mysql_config")  # MySQL数据库连接配置，可以不填
         self.mongodb_URI = config.get("mongodb_URI")  # MongoDB数据库连接字符串，可以不填
@@ -650,10 +663,12 @@ class Weibo(object):
             while try_count < MAX_TRY_COUNT:
                 try:
                     response = s.get(
-                        url, headers=self.headers, timeout=(5, 10), verify=False
+                        url, headers=self.media_headers, timeout=(5, 10), verify=False
                     )
                     response.raise_for_status()
                     downloaded = response.content
+                    if not downloaded:
+                        raise RequestException("响应内容为空(0字节)")
                     try_count += 1
 
                     # 获取文件后缀
@@ -779,7 +794,7 @@ class Weibo(object):
 
     def handle_download(self, file_type, file_dir, urls, w):
         """处理下载相关操作"""
-        file_prefix = w["created_at"][:11].replace("-", "") + "_" + str(w["id"])
+        file_prefix = w["created_at"][:10].replace("-", "") + "_" + str(w["id"])
         if file_type == "img":
 
             # 在file_type == "img" 中，urls 是字符串列表，需要遍历下载，因为可能存在gif的情况
@@ -792,10 +807,8 @@ class Weibo(object):
                     file_suffix = url[index:]
                 file_name = file_prefix + "_" + str(i + 1) + file_suffix
                 file_path = file_dir + os.sep + file_name
+                # 百度图床 image.baidu.com/search/down 已失效（返回空内容），改为直连 CDN
                 full_image_url = url
-                if file_suffix.lower() in [".jpg",".png"]:
-                # 为了修复图片下载403问题，增加百度作为图床，参考https://github.com/dataabc/weibo-search/issues/473 但是需要排除gif和livephoto情况
-                    full_image_url = 'https://image.baidu.com/search/down?url=' + url
                 self.download_one_file(full_image_url, file_path, file_type, w["id"])
 
             # if "," in urls:

@@ -383,3 +383,7 @@ js.json
 user_id_list.txt
 
 # Local environment variables
+
+cookie.txt
+run*.log
+weibo
