@@ -87,15 +87,24 @@ def save_refresh_token(token: str) -> None:
 
 
 def list_children(client: P115OpenClient, cid: str) -> dict:
-    """列出目录下的子项，返回 {名称: id}。"""
+    """列出目录下的子目录，返回 {名称: id}。"""
     result = {}
     offset = 0
     while True:
-        resp = client.fs_files_open({"cid": cid, "limit": 200, "offset": offset, "show_dir": 1})
-        data = resp.get("data") or []
+        resp = client.fs_files_open(
+            {"cid": cid, "limit": 200, "offset": offset, "show_dir": 1}
+        )
+        data = resp.get("data")
+        if isinstance(data, dict):
+            data = data.get("data") or data.get("list") or []
+        if not isinstance(data, list):
+            data = []
         for item in data:
-            if item.get("fc") == 0:  # 目录
-                result[item.get("fn")] = str(item.get("fid"))
+            if not isinstance(item, dict):
+                continue
+            is_dir = item.get("fc") == 0 or str(item.get("cid", "")) == str(item.get("fid", ""))
+            if is_dir and item.get("fn"):
+                result[item["fn"]] = str(item.get("fid") or item.get("cid"))
         if len(data) < 200:
             break
         offset += 200
@@ -107,10 +116,25 @@ def ensure_dir(client: P115OpenClient, parent: str, name: str) -> str:
     if name in children:
         return children[name]
     resp = client.fs_mkdir_open({"file_name": name, "pid": parent})
-    data = resp.get("data") or {}
-    cid = data.get("cid") or data.get("fid") or data.get("file_id")
+    data = resp.get("data")
+    if isinstance(data, list) and data:
+        data = data[0]
+    cid = None
+    if isinstance(data, dict):
+        cid = data.get("cid") or data.get("fid") or data.get("file_id")
     if not cid:
-        raise RuntimeError(f"创建目录失败: {name} -> {resp}")
+        # 目录已存在时接口会报 20004，此时回查一次拿 id
+        if resp.get("code") == 20004 or "已存在" in str(resp.get("message", "")):
+            children = list_children(client, parent)
+            if name in children:
+                return children[name]
+            found = client.fs_search_open({"search_value": name, "cid": parent, "limit": 20})
+            for item in (found.get("data") or []):
+                if isinstance(item, dict) and item.get("fn") == name and item.get("fid"):
+                    return str(item["fid"])
+        raise RuntimeError(
+            f"创建目录失败: {name} -> code={resp.get('code')} message={resp.get('message')}"
+        )
     log(f"  建目录 {name} (cid={cid})")
     return str(cid)
 
@@ -152,12 +176,19 @@ def main() -> int:
         data = resp.get("data") or {}
         new_refresh = data.get("refresh_token") or getattr(client, "refresh_token", "")
         # 不要把响应内容打进日志：其中含 access_token / refresh_token
-        log(f"token 刷新: {'成功' if resp.get('state') else '失败'}，有效期 {data.get('expires_in', '?')} 秒")
+        if resp.get("state"):
+            log(f"token 刷新成功，有效期 {data.get('expires_in', '?')} 秒")
+        else:
+            log(f"token 刷新未成功: code={resp.get('code')} message={resp.get('message')}（继续用现有 access_token）")
         # 库的 upload_* 会直接取 headers['authorization']，刷新后需要同步写入
         client.headers = dict(client.headers, authorization=f"Bearer {client.access_token}")
         save_refresh_token(new_refresh)
     except Exception as exc:  # noqa: BLE001
-        log(f"token 刷新失败，继续尝试直连: {type(exc).__name__}")
+        log(f"token 刷新异常（继续用现有 access_token）: {type(exc).__name__}")
+
+    access_token = getattr(client, "access_token", "") or ACCESS_TOKEN
+    if access_token:
+        client.headers = dict(client.headers, authorization=f"Bearer {access_token}")
 
     root = ensure_dir(client, TARGET_CID, REMOTE_DIR)
     total = ok = 0
