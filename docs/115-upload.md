@@ -11,13 +11,15 @@ Actions 只备份文本（csv/json），媒体文件太大（60 天约 1GB），
 |---|---|
 | `P115_ACCESS_TOKEN` | 115 开放平台的 access_token |
 | `P115_REFRESH_TOKEN` | 115 开放平台的 refresh_token（脚本会自动轮换并回写） |
-| `P115_APP_ID` | 开放应用的 AppID（OpenList 115 配置里叫 `client_id` 的那个数字） |
 | `P115_TARGET_CID` | 上传的目标目录 id，根目录填 `0` |
 | `P115_REMOTE_DIR` | 可选，目标目录下的子目录名，默认 `weibo` |
 | `GH_TOKEN_FOR_SECRET` | 可选，有仓库 Secrets 写权限的 PAT，用来回写轮换后的 refresh_token |
 
-这些值在 OpenList 的 `data/config.json` 里对应 `drivers` 中 115 的
-`access_token` / `refresh_token` / `client_id` 字段。
+这些值在 OpenList 的 `data/config.json` 里对应 115（Open 驱动）的
+`access_token` / `refresh_token` 字段。
+
+**不需要 AppID**：115 Open 的刷新接口 `POST /open/refreshToken` 只校验 `refresh_token`
+（OpenList 的 115_open 驱动也只传这一个参数），所以 AppID 不是必需项。
 
 ## 为什么需要 `GH_TOKEN_FOR_SECRET`
 
