@@ -85,17 +85,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: 上传结果（媒体，仅在勾选时）
+      - name: 媒体直传 115 网盘（勾选媒体时）
         if: github.event.inputs.media == 'yes'
-        uses: actions/upload-artifact@v4
-        with:
-          name: weibo-media-${{ github.run_number }}
-          path: |
-            weibo/**/img/**/*
-            weibo/**/video/**/*
-            weibo/**/live_photo/**/*
-          if-no-files-found: ignore
-          retention-days: 14
+        env:
+          P115_ACCESS_TOKEN: ${{ secrets.P115_ACCESS_TOKEN }}
+          P115_REFRESH_TOKEN: ${{ secrets.P115_REFRESH_TOKEN }}
+          P115_APP_ID: ${{ secrets.P115_APP_ID }}
+          P115_TARGET_CID: ${{ secrets.P115_TARGET_CID }}
+          P115_REMOTE_DIR: ${{ secrets.P115_REMOTE_DIR || 'weibo' }}
+          GH_TOKEN_FOR_SECRET: ${{ secrets.GH_TOKEN_FOR_SECRET }}
+        run: |
+          pip install p115client pynacl requests
+          python scripts/upload_115.py
 
       - name: 汇总
         if: always()
