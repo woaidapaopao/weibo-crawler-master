@@ -86,10 +86,11 @@ def save_refresh_token(token: str) -> None:
     log(f"refresh_token 回写 Secret: {resp.status_code}")
 
 
-def list_children(client: P115OpenClient, cid: str) -> dict:
-    """列出目录下的子目录，返回 {名称: id}。"""
+def list_children(client: P115OpenClient, cid: str):  # noqa: ANN201
+    """列出目录下的子目录，返回 {名称: id}；失败时返回空 dict 并打印结构。"""
     result = {}
     offset = 0
+    sample = None
     while True:
         resp = client.fs_files_open(
             {"cid": cid, "limit": 200, "offset": offset, "show_dir": 1}
@@ -102,16 +103,22 @@ def list_children(client: P115OpenClient, cid: str) -> dict:
         for item in data:
             if not isinstance(item, dict):
                 continue
-            is_dir = item.get("fc") == 0 or str(item.get("cid", "")) == str(item.get("fid", ""))
-            if is_dir and item.get("fn"):
-                result[item["fn"]] = str(item.get("fid") or item.get("cid"))
+            sample = sample or item
+            name = item.get("fn") or item.get("file_name") or item.get("n")
+            fid = item.get("fid") or item.get("cid") or item.get("file_id") or item.get("id")
+            is_dir = item.get("fc") == 0 or item.get("is_dir") in (1, True) or item.get("type") == 0
+            if name and fid and is_dir:
+                result[name] = str(fid)
         if len(data) < 200:
             break
         offset += 200
+    if not result and sample is not None:
+        log(f"  [调试] 列表返回 {len(data)} 项，字段: {list(sample.keys())}")
     return result
 
 
-def ensure_dir(client: P115OpenClient, parent: str, name: str) -> str:
+def ensure_dir(client: P115OpenClient, parent: str, name: str):
+    """确保目录存在，返回 cid；拿不到就返回 None（调用方走平铺兜底）。"""
     children = list_children(client, parent)
     if name in children:
         return children[name]
@@ -122,30 +129,26 @@ def ensure_dir(client: P115OpenClient, parent: str, name: str) -> str:
     cid = None
     if isinstance(data, dict):
         cid = data.get("cid") or data.get("fid") or data.get("file_id")
-    if not cid:
-        # 目录已存在时接口会报 20004，此时回查一次拿 id
-        if resp.get("code") == 20004 or "已存在" in str(resp.get("message", "")):
-            children = list_children(client, parent)
-            if name in children:
-                return children[name]
-            found = client.fs_search_open({"search_value": name, "cid": parent, "limit": 20})
-            for item in (found.get("data") or []):
-                if isinstance(item, dict) and item.get("fn") == name and item.get("fid"):
-                    return str(item["fid"])
-        raise RuntimeError(
-            f"创建目录失败: {name} -> code={resp.get('code')} message={resp.get('message')}"
-        )
-    log(f"  建目录 {name} (cid={cid})")
-    return str(cid)
+    if cid:
+        log(f"  建目录 {name} (cid={cid})")
+        return str(cid)
+    if resp.get("code") == 20004 or "已存在" in str(resp.get("message", "")):
+        children = list_children(client, parent)
+        if name in children:
+            return children[name]
+        log(f"  目录 {name} 已存在但拿不到 cid，改用平铺上传")
+        return None
+    log(f"  建目录 {name} 失败: code={resp.get('code')} message={resp.get('message')}，改用平铺上传")
+    return None
 
 
-def upload_file(client: P115OpenClient, path: Path, pid: str) -> bool:
+def upload_file(client: P115OpenClient, path: Path, pid: str, name: str = "") -> bool:
     for attempt in range(1, RETRY + 1):
         try:
             resp = client.upload_file_open(
                 file=str(path),
                 pid=pid,
-                filename=path.name,
+                filename=name or path.name,
                 filesha1=sha1_of(path),
                 filesize=path.stat().st_size,
             )
@@ -176,8 +179,10 @@ def main() -> int:
         data = resp.get("data") or {}
         new_refresh = data.get("refresh_token") or getattr(client, "refresh_token", "")
         # 不要把响应内容打进日志：其中含 access_token / refresh_token
-        if resp.get("state"):
-            log(f"token 刷新成功，有效期 {data.get('expires_in', '?')} 秒")
+        # 该接口直接返回 data 字典（access_token/refresh_token/expires_in）
+        if isinstance(resp, dict) and resp.get("access_token"):
+            log(f"token 刷新成功，有效期 {resp.get('expires_in', '?')} 秒")
+            new_refresh = resp.get("refresh_token") or new_refresh
         else:
             log(f"token 刷新未成功: code={resp.get('code')} message={resp.get('message')}（继续用现有 access_token）")
         # 库的 upload_* 会直接取 headers['authorization']，刷新后需要同步写入
@@ -190,25 +195,25 @@ def main() -> int:
     if access_token:
         client.headers = dict(client.headers, authorization=f"Bearer {access_token}")
 
-    root = ensure_dir(client, TARGET_CID, REMOTE_DIR)
+    root = ensure_dir(client, TARGET_CID, REMOTE_DIR) or TARGET_CID
     total = ok = 0
     for account_dir in sorted(p for p in SRC_DIR.iterdir() if p.is_dir()):
-        has_media = any((account_dir / d).exists() for d in MEDIA_DIRS)
-        if not has_media:
+        if not any((account_dir / d).exists() for d in MEDIA_DIRS):
             continue
         log(f"账号 {account_dir.name}")
-        acc_cid = ensure_dir(client, root, account_dir.name)
+        acc_cid = ensure_dir(client, root, account_dir.name) or root
         for media in MEDIA_DIRS:
             media_dir = account_dir / media
             if not media_dir.is_dir():
                 continue
             for sub in sorted(p for p in media_dir.iterdir() if p.is_dir()):
-                sub_cid = ensure_dir(client, acc_cid, f"{media}/{sub.name}".replace("/", "_"))
+                sub_cid = ensure_dir(client, acc_cid, f"{media}_{sub.name}") or acc_cid
                 for f in sorted(sub.iterdir()):
                     if not f.is_file() or f.name == "not_downloaded.txt":
                         continue
                     total += 1
-                    if upload_file(client, f, sub_cid):
+                    name = f.name if sub_cid != acc_cid else f"{account_dir.name}_{media}_{sub.name}_{f.name}"
+                    if upload_file(client, f, sub_cid, name):
                         ok += 1
 
     log(f"上传完成：成功 {ok}/{total}")
